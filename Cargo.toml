@@ -1,7 +1,9 @@
 [package]
-name = "tasker"
+name = "rtd"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+clap = { version = "4.3.4", features = ["derive"] }
+directories = "5.0.1"
 rusqlite = "0.29.0"
