@@ -1,14 +1,12 @@
-use std::io;
-use std::{fs, io::Write};
+use std::{io, io::Write, path::PathBuf};
 
-use clap::{Args, Parser, Subcommand};
-use rtd::{Todo, TodoClient};
+use clap::{Parser, Subcommand};
+use rtd::{get_all_todos, get_connection, initialize_tables, Todo};
 
 use directories::ProjectDirs;
 
 #[derive(Debug, Parser)]
-#[command(name = "rtd")]
-#[command(about = "Rob's todo CLI")]
+#[command(name = "rtd", about = "Rob's todo CLI", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -22,131 +20,123 @@ enum Commands {
         title: Option<String>,
     },
 
-    /// Get a todo from the database
+    /// Get one or more todos from the database
     #[command(arg_required_else_help = true)]
-    Get(GetArgs),
+    Get {
+        /// ID of the todo
+        id: Option<i64>,
+
+        /// Get all of the todos in the database
+        #[arg(short, long)]
+        all: bool,
+    },
 }
 
-#[derive(Debug, Args)]
-struct GetArgs {
-    #[command(subcommand)]
-    command: Option<GetCommands>,
+/// Get the path to the DB file on disk
+fn get_db_file_path() -> PathBuf {
+    let proj_dir = ProjectDirs::from("com", "arknet", "rtd")
+        .expect("to be able to set a project directory in a homedir");
+    proj_dir.data_dir().join("db.sqlite3")
 }
 
-#[derive(Debug, Subcommand)]
-enum GetCommands {
-    /// ID of the todo to retreive
-    Id { id: i32 },
-    /// Get all of the todos
-    All,
-}
+/// Setup the database
+fn setup() -> rusqlite::Result<()> {
+    let conn = get_connection(
+        get_db_file_path()
+            .to_str()
+            .expect("db path should be valid"),
+    )?;
+    initialize_tables(&conn)?;
 
-fn get_client() -> rusqlite::Result<TodoClient> {
-    if let Some(proj_dirs) = ProjectDirs::from("com", "arknet", "rtd") {
-        fs::create_dir_all(proj_dirs.data_dir())
-            .expect("homedir should exist and be owned by the current user");
-
-        let db_path = proj_dirs.data_dir().join("db.sqlite3");
-        let client = TodoClient::build(
-            db_path
-                .to_str()
-                .expect("path to DB file should be valid unicode"),
-        )?;
-
-        Ok(client)
-    } else {
-        println!("WARNING: could not load the todo DB, loading in-memory DB");
-
-        Ok(TodoClient::build(":memory")?)
-    }
-}
-
-fn print_todo(todo: &Todo) {
-    println!(
-        "{} (id:{:?}, complete:{:?}):
-    Description: {:?}",
-        todo.title.as_str(), todo.id, todo.complete,todo.description, 
-    );
+    Ok(())
 }
 
 fn print_all_todos() {
-    let client = get_client().expect("client should be able to be created");
-    let todos = client
-        .get_all_todos()
-        .expect("rtd should be able to list all todos");
+    let conn = get_connection(
+        get_db_file_path()
+            .to_str()
+            .expect("db path should be valid"),
+    )
+    .expect("connection with DB should be established");
 
-    for todo in todos {
-        print_todo(&todo);
+    match get_all_todos(&conn) {
+        Ok(todos) => {
+            for todo in todos {
+                println!("{todo}")
+            }
+        }
+        Err(e) => panic!("An error ocurred while querying the todos DB: {:?}", e),
     }
 }
 
-fn print_todo_by_id(id: i32) {
-    let client = get_client().expect("client should be able to be created");
-    let maybe_todo = match client.get_todo_by_id(id) {
-        Ok(todo) => Some(todo),
-        _ => {
+fn print_todo_from_id(id: i64) {
+    let conn = get_connection(
+        get_db_file_path()
+            .to_str()
+            .expect("db path should be valid"),
+    )
+    .expect("connection with DB should be established");
+
+    match Todo::from_id(id, &conn) {
+        Ok(todo) => println!("{todo}"),
+        Err(_) => {
             println!("Could not find any todo with id: {id}");
-            None
         }
     };
-
-    if let Some(todo) = maybe_todo {
-        print_todo(&todo);
-    }
 }
 
-fn create_new_todo(title: Option<String>) {
-    let client = get_client().expect("client should be able to be created");
+fn create_new_todo(todo_title: Option<String>) {
+    let conn = get_connection(
+        get_db_file_path()
+            .to_str()
+            .expect("db path should be valid"),
+    )
+    .expect("connection with DB should be established");
 
-    let mut title_str = String::new();
-    let mut description_str = String::new();
+    let mut title = String::new();
+    let mut description = String::new();
 
-    if let Some(t) = title {
-        title_str = t;
-    } else {
+    // get the title if we don't have one already
+    if let None = todo_title {
         print!("Todo title: ");
         io::stdout().flush().unwrap();
         io::stdin()
-            .read_line(&mut title_str)
+            .read_line(&mut title)
             .expect("should be able to read title from stdin");
+    } else {
+        title = todo_title.unwrap();
     }
 
     print!("Todo Description: ");
     io::stdout().flush().unwrap();
     io::stdin()
-        .read_line(&mut description_str)
+        .read_line(&mut description)
         .expect("should be able to read description from stdin");
 
-    let todo = Todo {
-        id: -1,
-        title: title_str.trim().to_string(),
-        description: description_str.trim().to_string(),
-        complete: false,
-    };
+    let todo = Todo::new(title.trim(), description.trim(), false)
+        .save(&conn)
+        .expect("todo should be saved in DB");
 
-    client
-        .add(&todo)
-        .expect("TodoClient shoudl be able to add a todo");
-
-    println!("Created new todo - {:?}", todo.title);
+    println!("Created new todo:");
+    println!("===========================================");
+    println!("{todo}");
+    println!("===========================================");
 }
 
 fn main() {
     let args = Cli::parse();
 
+    setup().expect("database should setup properly");
+
     match args.command {
         Commands::New { title } => {
             create_new_todo(title);
         }
-        Commands::Get(get) => {
-            let get_cmd = get.command.unwrap_or(GetCommands::All);
-            match get_cmd {
-                GetCommands::All => {
-                    print_all_todos();
-                }
-                GetCommands::Id { id } => {
-                    print_todo_by_id(id);
-                }
+        Commands::Get { id, all } => {
+            if id.is_some() {
+                print_todo_from_id(id.unwrap());
+            } else if all {
+                print_all_todos();
             }
         }
     }
